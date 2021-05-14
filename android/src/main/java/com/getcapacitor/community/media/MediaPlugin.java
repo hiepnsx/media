@@ -2,6 +2,7 @@ package com.getcapacitor.community.media;
 
 import android.Manifest;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -21,16 +22,28 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
 
-@NativePlugin(permissions = {
+@NativePlugin(
+    permissions = {
         Manifest.permission.READ_EXTERNAL_STORAGE,
         Manifest.permission.WRITE_EXTERNAL_STORAGE
-})
+    },
+    requestCodes = {
+        MediaPlugin.REQUEST_SAVE_PHOTO,
+        MediaPlugin.REQUEST_CREATE_ALBUM
+    }
+)
 public class MediaPlugin extends Plugin {
+    protected static final int REQUEST_SAVE_PHOTO = 1001; // Unique request code
+    protected static final int REQUEST_CREATE_ALBUM = 1002; // Unique request code
 
     // @todo
     @PluginMethod()
@@ -58,7 +71,7 @@ public class MediaPlugin extends Plugin {
         JSArray albums = new JSArray();
         StringBuffer list = new StringBuffer();
 
-        String[] projection = new String[]{"DISTINCT " + MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME};
+        String[] projection = new String[]{MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME};
         Cursor cur = getActivity().getContentResolver().query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, projection, null, null, null);
 
         while (cur.moveToNext()) {
@@ -93,7 +106,7 @@ public class MediaPlugin extends Plugin {
         } else {
             Log.d("DEBUG LOG", "NOT ALLOWED");
             saveCall(call);
-            pluginRequestPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE, 1986);
+            pluginRequestPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE, REQUEST_CREATE_ALBUM);
         }
     }
 
@@ -103,8 +116,8 @@ public class MediaPlugin extends Plugin {
         String folder;
 
         if (Build.VERSION.SDK_INT >= 29) {
-            folder = getContext().getExternalMediaDirs()[0].getAbsolutePath()+"/"+folderName;
-        }else{
+            folder = getContext().getExternalMediaDirs()[0].getAbsolutePath() + "/" + folderName;
+        } else {
             folder = Environment.getExternalStoragePublicDirectory(folderName).toString();
         }
 
@@ -121,8 +134,8 @@ public class MediaPlugin extends Plugin {
                 call.success();
             }
         } else {
-            Log.d("DEBUG LOG", "___ERROR ALBUM ALREADY EXISTS");
-            call.error("Album already exists");
+            Log.d("DEBUG LOG", "ALBUM ALREADY EXISTS");
+            call.success();
         }
 
     }
@@ -137,7 +150,7 @@ public class MediaPlugin extends Plugin {
         } else {
             Log.d("DEBUG LOG", "NOT ALLOWED");
             saveCall(call);
-            pluginRequestPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE, 1986);
+            pluginRequestPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE, REQUEST_SAVE_PHOTO);
             Log.d("DEBUG LOG", "___SAVE PHOTO TO ALBUM AFTER PERMISSION REQUEST");
         }
     }
@@ -186,7 +199,42 @@ public class MediaPlugin extends Plugin {
         }
 
         Uri inputUri = Uri.parse(inputPath);
-        File inputFile = new File(inputUri.getPath());
+        boolean isRemoteUrl = "http".equalsIgnoreCase(inputUri.getScheme()) || "https".equalsIgnoreCase(inputUri.getScheme());
+        Log.d("isRemoteURL", String.valueOf(isRemoteUrl));
+
+        InputStream is = null;
+        String extension = "jpg";
+
+        if (isRemoteUrl) {
+            HttpURLConnection conn = null;
+
+            try {
+                URL url = new URL(inputPath);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(5 * 1000);
+                conn.setRequestMethod("GET");
+                if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                    call.error("Can't access file!");
+                    return;
+                }
+                is = conn.getInputStream();
+                extension = inputPath.substring(inputPath.lastIndexOf('.') + 1).split("\\?")[0].split("#")[0];
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+        } else {
+            File inputFile = null;
+            try {
+                inputFile = new File(inputUri.getPath());
+                is = new FileInputStream(inputFile);
+                String absolutePath = inputFile.getAbsolutePath();
+                extension = absolutePath.substring(absolutePath.lastIndexOf(".") + 1);
+            } catch (FileNotFoundException e) {
+                throw new RuntimeException("Source file not found: " + inputFile + ", error: " + e.getMessage());
+            }
+        }
+
 
         String album = call.getString("album");
         File albumDir = null;
@@ -196,7 +244,7 @@ public class MediaPlugin extends Plugin {
         if (Build.VERSION.SDK_INT >= 29) {
             albumPath = getContext().getExternalMediaDirs()[0].getAbsolutePath();
 
-        }else{
+        } else {
             albumPath = Environment.getExternalStoragePublicDirectory(dest).getAbsolutePath();
         }
 
@@ -204,14 +252,14 @@ public class MediaPlugin extends Plugin {
 
         if (album != null) {
             albumDir = new File(albumPath, album);
-        }else{
+        } else {
             call.error("album name required");
         }
 
         Log.d("ENV LOG - ALBUM DIR", String.valueOf(albumDir));
 
         try {
-            File expFile = copyFile(inputFile, albumDir);
+            File expFile = copyFile(is, albumDir, extension);
             scanPhoto(expFile);
 
             JSObject result = new JSObject();
@@ -224,7 +272,7 @@ public class MediaPlugin extends Plugin {
 
     }
 
-    private File copyFile(File inputFile, File albumDir) {
+    private File copyFile(InputStream is, File albumDir, String extension) {
 
         // if destination folder does not exist, create it
         if (!albumDir.exists()) {
@@ -233,22 +281,14 @@ public class MediaPlugin extends Plugin {
             }
         }
 
-        String absolutePath = inputFile.getAbsolutePath();
-        String extension = absolutePath.substring(absolutePath.lastIndexOf("."));
-
         // generate image file name using current date and time
         String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmssSSS").format(new Date());
-        File newFile = new File(albumDir, "IMG_" + timeStamp + extension);
+        File newFile = new File(albumDir, "IMG_" + timeStamp + "." + extension);
+        Log.d("NEW_FILE", newFile.toString());
 
-        // Read and write image files
-        FileChannel inChannel = null;
+        // Write image files
         FileChannel outChannel = null;
 
-        try {
-            inChannel = new FileInputStream(inputFile).getChannel();
-        } catch (FileNotFoundException e) {
-            throw new RuntimeException("Source file not found: " + inputFile + ", error: " + e.getMessage());
-        }
         try {
             outChannel = new FileOutputStream(newFile).getChannel();
         } catch (FileNotFoundException e) {
@@ -256,15 +296,15 @@ public class MediaPlugin extends Plugin {
         }
 
         try {
-            inChannel.transferTo(0, inChannel.size(), outChannel);
+            outChannel.transferFrom(Channels.newChannel(is), 0, Long.MAX_VALUE);
         } catch (IOException e) {
             throw new RuntimeException("Error transfering file, error: " + e.getMessage());
         } finally {
-            if (inChannel != null) {
+            if (is != null) {
                 try {
-                    inChannel.close();
+                    is.close();
                 } catch (IOException e) {
-                    Log.d("SaveImage", "Error closing input file channel: " + e.getMessage());
+                    Log.d("SaveImage", "Error closing input stream: " + e.getMessage());
                     // does not harm, do nothing
                 }
             }
@@ -302,9 +342,35 @@ public class MediaPlugin extends Plugin {
         pluginRequestPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE, 1986);
         if (hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
             call.success();
-        }else{
+        } else {
             call.error("permission denied");
         }
+    }
+
+    @Override
+    protected void handleRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.handleRequestPermissionsResult(requestCode, permissions, grantResults);
+        Log.d("requestCode", String.valueOf(requestCode));
+        Log.d("permissions", permissions.toString());
+        Log.d("grantResults", grantResults.toString());
+
+        PluginCall savedCall = getSavedCall();
+        if (savedCall == null) {
+            return;
+        }
+
+        for(int result : grantResults) {
+            if (result == PackageManager.PERMISSION_DENIED) {
+                savedCall.error("User denied permission");
+                return;
+            }
+        }
+        if (requestCode == REQUEST_SAVE_PHOTO) {
+            _saveMedia(savedCall, "PICTURES");
+        } else if (requestCode == REQUEST_CREATE_ALBUM) {
+            _createAlbum(savedCall);
+        }
+
     }
 
 }

@@ -7,3 +7,7 @@ Build
 *.iml
 .idea
 package-lock.json
+
+.gradle/
+.project
+.settings/
